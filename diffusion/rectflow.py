@@ -48,9 +48,11 @@ class RectifiedFlow:
             (x_t, x0, vel): interpolated point, noise used, and regression
                             target velocity (x1 - x0), all shape (B, *).
         """
-        # TODO (6.A) — sample x0 ~ N(0,I), form x_t, compute vel
-        # Hint: broadcast t to match x1's spatial dimensions before multiplying.
-        raise NotImplementedError
+        x0 = torch.randn_like(x1)
+        t_ = t.view(-1, *([1] * (x1.dim() - 1)))
+        x_t = (1 - t_) * x0 + t_ * x1
+        vel = x1 - x0
+        return x_t, x0, vel
 
     def loss(self, v_theta: nn.Module, x1: Tensor) -> Tensor:
         """Rectified Flow training loss (RF objective).
@@ -65,8 +67,11 @@ class RectifiedFlow:
         Returns:
             Scalar loss.
         """
-        # TODO (6.A)
-        raise NotImplementedError
+        B = x1.shape[0]
+        t = torch.rand(B, device=x1.device)
+        x_t, _, vel = self.forward_process(x1, t)
+        pred = v_theta(x_t, t)
+        return F.mse_loss(pred, vel)
 
     # ------------------------------------------------------------------
     # 6.B  Euler ODE sampler
@@ -96,8 +101,16 @@ class RectifiedFlow:
         Returns:
             Generated samples X_1, shape (B, C, H, W).
         """
-        # TODO (6.B)
-        raise NotImplementedError
+        device = torch.device(device)
+        dt = 1.0 / num_steps
+        B = shape[0]
+        x = torch.randn(shape, device=device)
+        for i in range(num_steps):
+            t = i * dt
+            t_batch = torch.full((B,), t, device=device)
+            v = v_theta(x, t_batch)
+            x = x + v * dt
+        return x
 
     # ------------------------------------------------------------------
     # 6.C  Reflow  (data generation only — retraining uses loss() above)
@@ -130,5 +143,20 @@ class RectifiedFlow:
         Returns:
             (x0_all, x1_all): tensors of shape (n_pairs, C, H, W) on CPU.
         """
-        # TODO (6.C)
-        raise NotImplementedError
+        device = torch.device(device)
+        dt = 1.0 / num_steps
+        x0_list, x1_list = [], []
+        remaining = n_pairs
+        while remaining > 0:
+            bs = min(batch_size, remaining)
+            x0 = torch.randn((bs, *image_shape), device=device)
+            x = x0.clone()
+            for i in range(num_steps):
+                t = i * dt
+                t_batch = torch.full((bs,), t, device=device)
+                v = v_theta(x, t_batch)
+                x = x + v * dt
+            x0_list.append(x0.cpu())
+            x1_list.append(x.cpu())
+            remaining -= bs
+        return torch.cat(x0_list, dim=0), torch.cat(x1_list, dim=0)

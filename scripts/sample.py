@@ -88,12 +88,22 @@ def get_args():
     return p.parse_args()
 
 
-def load_vp_model(checkpoint: str, device) -> tuple[VPSDE, UNet]:
-    raise NotImplementedError("Fill in VPSDE and UNet loading.")
+def load_vp_model(checkpoint: str, device, beta_min: float, beta_max: float, T: int) -> tuple[VPSDE, UNet]:
+    sde = VPSDE(beta_min=beta_min, beta_max=beta_max, T=T)
+    model = UNet(in_channels=1, base_channels=64).to(device)
+    state = torch.load(checkpoint, map_location=device)
+    model.load_state_dict(state)
+    model.eval()
+    return sde, model
 
 
 def load_rf_model(checkpoint: str, device) -> tuple[RectifiedFlow, UNet]:
-    raise NotImplementedError("Fill in RectifiedFlow and UNet loading.")
+    flow = RectifiedFlow()
+    model = UNet(in_channels=1, base_channels=64).to(device)
+    state = torch.load(checkpoint, map_location=device)
+    model.load_state_dict(state)
+    model.eval()
+    return flow, model
 
 
 def main():
@@ -104,21 +114,96 @@ def main():
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
 
     if args.method == "em":
-        # TODO (5.C.iii)
-        raise NotImplementedError
+        ckpt = args.checkpoint or args.vp_checkpoint
+        if ckpt is None:
+            raise ValueError("--checkpoint (VP) is required for method=em")
+        sde, model = load_vp_model(ckpt, device, args.beta_min, args.beta_max, args.T)
+        samples = sde.euler_maruyama(model, shape, num_steps=args.num_steps, device=device)
+        save_grid(samples, args.out, nrow=8,
+                  title=f"VP EM ({args.num_steps} steps)")
 
     elif args.method == "pc":
-        # TODO (5.C.iv)
-        raise NotImplementedError
+        ckpt = args.checkpoint or args.vp_checkpoint
+        if ckpt is None:
+            raise ValueError("--checkpoint (VP) is required for method=pc")
+        sde, model = load_vp_model(ckpt, device, args.beta_min, args.beta_max, args.T)
+        samples = sde.predictor_corrector(
+            model, shape,
+            num_steps=args.num_steps,
+            n_corrector=args.n_corrector,
+            snr=args.snr,
+            device=device,
+        )
+        save_grid(samples, args.out, nrow=8,
+                  title=f"VP PC ({args.num_steps} steps, n_corr={args.n_corrector})")
 
     elif args.method == "rectflow":
-        # TODO (6.B / 6.C)
-        raise NotImplementedError
+        ckpt = args.checkpoint or args.rf_checkpoint
+        if ckpt is None:
+            raise ValueError("--checkpoint (RF) is required for method=rectflow")
+        flow, model = load_rf_model(ckpt, device)
+        samples = flow.euler_sample(model, shape, num_steps=args.num_steps, device=device)
+        save_grid(samples, args.out, nrow=8,
+                  title=f"Rectified Flow ({args.num_steps} steps)")
 
     elif args.method == "all":
-        # TODO (6.D) — generate 8 fixed-seed samples from each method and
-        # arrange them in a 4×8 grid as specified in Problem 6.D.
-        raise NotImplementedError
+        # Side-by-side comparison: 8 samples per method, stacked as a 4x8 grid.
+        # Rows: EM, PC, RF (multi-step), RF reflow (1-step)
+        if args.vp_checkpoint is None or args.rf_checkpoint is None or args.reflow_checkpoint is None:
+            raise ValueError(
+                "--vp_checkpoint, --rf_checkpoint, and --reflow_checkpoint are all required for method=all"
+            )
+        n = 8
+        small_shape = (n, 1, 28, 28)
+        rows = []
+        titles = []
+
+        # 1) VP EM
+        torch.manual_seed(args.seed)
+        sde, vp_model = load_vp_model(
+            args.vp_checkpoint, device, args.beta_min, args.beta_max, args.T
+        )
+        rows.append(sde.euler_maruyama(vp_model, small_shape, num_steps=args.num_steps, device=device))
+        titles.append(f"VP EM ({args.num_steps})")
+
+        # 2) VP PC
+        torch.manual_seed(args.seed)
+        rows.append(sde.predictor_corrector(
+            vp_model, small_shape,
+            num_steps=args.num_steps,
+            n_corrector=args.n_corrector,
+            snr=args.snr,
+            device=device,
+        ))
+        titles.append(f"VP PC ({args.num_steps}, n_corr={args.n_corrector})")
+
+        # 3) Rectified Flow (multi-step Euler)
+        torch.manual_seed(args.seed)
+        flow, rf_model = load_rf_model(args.rf_checkpoint, device)
+        rows.append(flow.euler_sample(rf_model, small_shape, num_steps=100, device=device))
+        titles.append("Rectified Flow (100 steps)")
+
+        # 4) Rectified Flow Reflow (1-step)
+        torch.manual_seed(args.seed)
+        _, reflow_model = load_rf_model(args.reflow_checkpoint, device)
+        rows.append(flow.euler_sample(reflow_model, small_shape, num_steps=1, device=device))
+        titles.append("Reflow (1 step)")
+
+        all_samples = torch.cat(rows, dim=0)  # (4*n, 1, 28, 28)
+        grid = make_grid(all_samples.clamp(-1, 1) * 0.5 + 0.5, nrow=n)
+
+        fig, ax = plt.subplots(figsize=(n, len(rows) + 1))
+        ax.imshow(grid.permute(1, 2, 0).cpu().numpy(), cmap="gray")
+        ax.axis("off")
+        # Row labels on the left
+        H = 28
+        for i, title in enumerate(titles):
+            y = i * (H + 2) + H // 2 + 1
+            ax.text(-4, y, title, ha="right", va="center", fontsize=8)
+        plt.tight_layout()
+        plt.savefig(args.out, dpi=150, bbox_inches="tight")
+        plt.close()
+        print(f"Saved: {args.out}")
 
 
 if __name__ == "__main__":
